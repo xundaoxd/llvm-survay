@@ -15,6 +15,7 @@
 #include "MacroExpandAction.h"
 
 static llvm::cl::OptionCategory MacroExpandCategory("macro-expand options");
+
 static llvm::cl::opt<std::string>
     inputFilename(llvm::cl::init("-"), llvm::cl::Positional,
                   llvm::cl::desc("<file>"), llvm::cl::cat(MacroExpandCategory));
@@ -33,6 +34,18 @@ static llvm::cl::opt<std::string>
                    llvm::cl::desc("Write output to <file>"),
                    llvm::cl::cat(MacroExpandCategory));
 
+std::vector<std::string>
+CreateArgs(const std::string &filename = inputFilename) {
+  std::vector<std::string> tmp{"-E", "-triple", "drai"};
+  std::transform(includeDirs.begin(), includeDirs.end(),
+                 std::back_inserter(tmp),
+                 [](auto &&item) { return "-I" + item; });
+  std::transform(macroDefines.begin(), macroDefines.end(),
+                 std::back_inserter(tmp),
+                 [](auto &&item) { return "-D" + item; });
+  tmp.push_back(filename);
+  return tmp;
+}
 int main(int argc, char *argv[]) {
   llvm::cl::ParseCommandLineOptions(argc, argv);
 
@@ -42,34 +55,51 @@ int main(int argc, char *argv[]) {
       new llvm::vfs::InMemoryFileSystem();
   overlay_filesystem->pushOverlay(upper_filesystem);
 
+  std::vector<std::string> base_args = CreateArgs();
+
   std::unique_ptr<clang::CompilerInstance> clang =
       std::make_unique<clang::CompilerInstance>();
 
   clang->createDiagnostics();
   clang->createFileManager(overlay_filesystem);
 
-  clang::CompilerInvocation::CreateFromArgs(clang->getInvocation(),
-                                            {"-E", inputFilename.c_str()},
+  std::vector<const char *> pp_args;
+  pp_args.reserve(base_args.size());
+  std::transform(base_args.begin(), base_args.end(),
+                 std::back_inserter(pp_args),
+                 [](auto &item) { return item.data(); });
+  clang::CompilerInvocation::CreateFromArgs(clang->getInvocation(), pp_args,
                                             clang->getDiagnostics());
 
   std::string O;
   llvm::raw_string_ostream pp_os(O);
   MacroExpandAction pp_act(pp_os);
   if (!clang->ExecuteAction(pp_act)) {
-    llvm::errs() << "ExecuteAction failed\n";
+    llvm::errs() << "Expand macro failed\n";
     return 1;
   }
 
   const std::string cppFilename = inputFilename + ".ii";
+  base_args.back() = cppFilename;
   upper_filesystem->addFile(cppFilename, 0,
                             llvm::MemoryBuffer::getMemBufferCopy(O));
-  clang::CompilerInvocation::CreateFromArgs(clang->getInvocation(),
-                                            {"-E", cppFilename.c_str()},
+  std::vector<const char *> args;
+  args.reserve(base_args.size());
+  std::transform(base_args.begin(), base_args.end(), std::back_inserter(args),
+                 [](auto &item) { return item.data(); });
+  clang::CompilerInvocation::CreateFromArgs(clang->getInvocation(), args,
                                             clang->getDiagnostics());
 
   std::error_code EC;
   llvm::raw_fd_ostream OS(outputFilename, EC);
+  if (EC) {
+    llvm::errs() << EC.message() << '\n';
+    return 1;
+  }
   DraiExpandAction act(OS);
-  clang->ExecuteAction(act);
+  if (!clang->ExecuteAction(act)) {
+    llvm::errs() << "Expand kernel function failed\n";
+    return 1;
+  }
   return 0;
 }
