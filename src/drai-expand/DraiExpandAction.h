@@ -3,6 +3,7 @@
 #include <regex>
 #include <sstream>
 
+#include "fmt/format.h"
 #include "clang/AST/Mangle.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -40,19 +41,6 @@ void $func_name($func_args) {
 char call_template[] = R"^(
   ::drai::PushLaunchConfig($config);
   $callee($arg_vars))^";
-
-inline std::string BufferDump(const std::string &buffer) {
-  std::stringstream ss;
-  auto first = buffer.begin();
-  auto last = buffer.end();
-  if (first != last) {
-    ss << (int)*first;
-  }
-  while (++first < last) {
-    ss << ", " << (int)*first;
-  }
-  return ss.str();
-}
 
 } // namespace
 
@@ -174,8 +162,9 @@ public:
         llvm::errs() << "Could not find function: " << mangle_name << '\n';
         exit(1);
       }
-      tmp = std::regex_replace(tmp, std::regex("\\$binary_data"),
-                               BufferDump(*buf));
+      tmp =
+          std::regex_replace(tmp, std::regex("\\$binary_data"),
+                             fmt::format("0x{:02x}", fmt::join(*buf, ", 0x")));
     }
 
     return tmp;
