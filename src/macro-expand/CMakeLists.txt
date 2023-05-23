@@ -4,7 +4,7 @@ include(AddClang)
 set(LLVM_LINK_COMPONENTS
     Support
 )
-add_clang_executable(macro-expand MacroExpand.cpp)
+add_clang_executable(macro-expand macro-expand.cpp)
 target_include_directories(macro-expand
     PRIVATE
     ${LLVM_INCLUDE_DIRS}
