@@ -1,4 +1,7 @@
 #pragma once
+#include <iomanip>
+#include <regex>
+#include <sstream>
 
 #include "clang/AST/Mangle.h"
 #include "clang/AST/RecursiveASTVisitor.h"
@@ -6,11 +9,59 @@
 #include "clang/Frontend/FrontendAction.h"
 #include "clang/Rewrite/Core/Rewriter.h"
 
+#include "ElfBinary.h"
+
+namespace {
+
+char header_template[] = R"^(
+#include <mutex>
+
+)^";
+
+char function_template[] = R"^(
+void $func_name($func_args) {
+  static char binary[] = {$binary_data};
+
+  static std::once_flag flag;
+  std::call_once(flag, [&]() {
+    drai::graph::KernelEntry entry((void(*)($func_args))&$func_name, std::string(reinterpret_cast<const char*>(binary), sizeof(binary)));
+    drai::graph::DraiContext::Instance()->RegisterKernel(std::move(entry));
+  });
+  auto&& args = ::drai::PopLaunchConfig();
+  assert(args.size() >= 1);
+  drai::graph::DraiGraph* graph = (drai::graph::DraiGraph*)args[0];
+  auto op = graph->NewKernel("$func_name" $arg_vars);
+  if (args.size() >= 2) {
+    op.CoreCount(args[1]);
+  }
+}
+)^";
+
+char call_template[] = R"^(
+  ::drai::PushLaunchConfig($config);
+  $callee($arg_vars))^";
+
+inline std::string BufferDump(const std::string &buffer) {
+  std::stringstream ss;
+  auto first = buffer.begin();
+  auto last = buffer.end();
+  if (first != last) {
+    ss << (int)*first;
+  }
+  while (++first < last) {
+    ss << ", " << (int)*first;
+  }
+  return ss.str();
+}
+
+} // namespace
+
 class DraiExpandASTVisitor
     : public clang::RecursiveASTVisitor<DraiExpandASTVisitor> {
 public:
-  DraiExpandASTVisitor(clang::ASTContext *Context, clang::Rewriter &TheRewriter)
-      : Context(Context), TheRewriter(TheRewriter),
+  DraiExpandASTVisitor(ElfBinary &elf, clang::ASTContext *Context,
+                       clang::Rewriter &TheRewriter)
+      : elf(elf), Context(Context), TheRewriter(TheRewriter),
         MC(clang::ItaniumMangleContext::create(*Context,
                                                Context->getDiagnostics())) {}
 
@@ -42,48 +93,116 @@ public:
   }
   bool VisitDRAIKernelCallExpr(clang::DRAIKernelCallExpr *Decl) {
     // TODO
+    std::string tmp = call_template;
+
+    {
+      // for $config
+      auto cfgs = Decl->getConfig()->inits();
+      std::stringstream ss;
+      auto first = cfgs.begin();
+      auto last = cfgs.end();
+      if (first != last) {
+        ss << TheRewriter.getRewrittenText((*first)->getSourceRange());
+      }
+      while (++first != last) {
+        ss << ", " << TheRewriter.getRewrittenText((*first)->getSourceRange());
+      }
+      tmp = std::regex_replace(tmp, std::regex("\\$config"), ss.str());
+    }
+
+    {
+      // for $callee
+      clang::SourceRange targ_range = Decl->getSourceRange();
+      targ_range.setEnd(Decl->getConfig()->getSourceRange().getBegin());
+      std::string callee = TheRewriter.getRewrittenText(
+          clang::CharSourceRange::getCharRange(targ_range));
+      tmp = std::regex_replace(tmp, std::regex("\\$callee"), callee);
+    }
+
+    {
+      // for $arg_vars
+      std::stringstream ss;
+      auto first = Decl->arg_begin();
+      auto last = Decl->arg_end();
+      if (first != last) {
+        ss << TheRewriter.getRewrittenText((*first)->getSourceRange());
+      }
+      while (++first != last) {
+        ss << ", " << TheRewriter.getRewrittenText((*first)->getSourceRange());
+      }
+      tmp = std::regex_replace(tmp, std::regex("\\$arg_vars"), ss.str());
+    }
+
+    TheRewriter.ReplaceText(
+        TheRewriter.getSourceMgr().getExpansionRange(Decl->getSourceRange()),
+        tmp);
     return true;
   }
 
   std::string GenKernelFuncWrapper(clang::FunctionDecl *Decl) {
-    std::string wrapper;
-    llvm::raw_string_ostream OS(wrapper);
+    std::string tmp = function_template;
 
-    OS << "::drai::graph::DraiOp " << Decl->getName() << "(";
     {
+      // for $func_name
+      tmp = std::regex_replace(tmp, std::regex("\\$func_name"),
+                               Decl->getName().str());
+    }
+
+    {
+      // for $func_args
+      std::stringstream ss;
       auto first = Decl->param_begin();
       auto last = Decl->param_end();
       if (first != last) {
-        OS << (*first)->getType().getAsString() << " " << (*first)->getName();
+        ss << (*first)->getType().getAsString() << " "
+           << (*first)->getName().str();
       }
-
       while (++first != last) {
-        OS << ", " << (*first)->getType().getAsString() << " "
-           << (*first)->getName();
+        ss << ", " << (*first)->getType().getAsString() << " "
+           << (*first)->getName().str();
       }
+      tmp = std::regex_replace(tmp, std::regex("\\$func_args"), ss.str());
     }
-    OS << "){\n";
 
-    // TODO
+    {
+      // for $binary_data
+      std::string mangle_name;
+      llvm::raw_string_ostream OS(mangle_name);
+      MC->mangleName(llvm::cast<clang::NamedDecl>(Decl), OS);
+      std::unique_ptr<std::string> buf = elf.getSymbolBuffer(mangle_name);
+      if (!buf) {
+        llvm::errs() << "Could not find function: " << mangle_name << '\n';
+        exit(1);
+      }
+      tmp = std::regex_replace(tmp, std::regex("\\$binary_data"),
+                               BufferDump(*buf));
+    }
 
-    OS << "}\n";
-    return wrapper;
+    return tmp;
+  }
+
+  void FinishVisit() {
+    auto &&SM = TheRewriter.getSourceMgr();
+    clang::SourceLocation begin = SM.translateLineCol(SM.getMainFileID(), 1, 1);
+    TheRewriter.InsertTextBefore(begin, header_template);
   }
 
 private:
   clang::ASTContext *Context;
   clang::Rewriter &TheRewriter;
   std::unique_ptr<clang::ItaniumMangleContext> MC;
+  ElfBinary &elf;
 };
 
 class DraiExpandASTConsumer : public clang::ASTConsumer {
 public:
-  DraiExpandASTConsumer(clang::ASTContext *Context,
+  DraiExpandASTConsumer(ElfBinary &elf, clang::ASTContext *Context,
                         clang::Rewriter &TheRewriter)
-      : Visitor(Context, TheRewriter) {}
+      : Visitor(elf, Context, TheRewriter) {}
 
   void HandleTranslationUnit(clang::ASTContext &Context) override {
     Visitor.TraverseDecl(Context.getTranslationUnitDecl());
+    Visitor.FinishVisit();
   }
 
 private:
@@ -94,16 +213,23 @@ class DraiExpandAction : public clang::ASTFrontendAction {
 private:
   llvm::raw_ostream &OS;
   clang::Rewriter TheRewriter;
+  ElfBinary elf_binary;
 
 public:
-  DraiExpandAction(llvm::raw_ostream &OS) : OS(OS) {}
+  DraiExpandAction(const std::string &elf_binary, llvm::raw_ostream &OS)
+      : elf_binary(elf_binary), OS(OS) {
+    if (!this->elf_binary.good()) {
+      llvm::errs() << "Could not open elf binary " << elf_binary << '\n';
+      exit(1);
+    }
+  }
 
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &CI,
                     llvm::StringRef InFile) override {
     TheRewriter.setSourceMgr(CI.getSourceManager(), CI.getLangOpts());
-    return std::make_unique<DraiExpandASTConsumer>(&CI.getASTContext(),
-                                                   TheRewriter);
+    return std::make_unique<DraiExpandASTConsumer>(
+        elf_binary, &CI.getASTContext(), TheRewriter);
   }
   void EndSourceFileAction() override {
     TheRewriter.getEditBuffer(TheRewriter.getSourceMgr().getMainFileID())

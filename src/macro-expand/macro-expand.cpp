@@ -9,9 +9,9 @@
 #include "clang/Tooling/Tooling.h"
 #include "llvm/ADT/IntrusiveRefCntPtr.h"
 #include "llvm/Support/CommandLine.h"
-#include "llvm/Support/VirtualFileSystem.h"
 
 #include "DraiExpandAction.h"
+#include "LayerFilesystem.h"
 #include "MacroExpandAction.h"
 
 static llvm::cl::OptionCategory MacroExpandCategory("macro-expand options");
@@ -24,10 +24,18 @@ static llvm::cl::list<std::string> includeDirs(
     llvm::cl::desc(
         "Add directory to the end of the list of include search paths"),
     llvm::cl::cat(MacroExpandCategory));
+
 static llvm::cl::list<std::string> macroDefines(
     "D", llvm::cl::Prefix, llvm::cl::value_desc("macro=value"),
     llvm::cl::desc("Define <macro> to <value> (or 1 if <value> omitted)"),
     llvm::cl::cat(MacroExpandCategory));
+
+static llvm::cl::opt<std::string>
+    elfBinary("B", llvm::cl::Prefix, llvm::cl::Required,
+              llvm::cl::value_desc("file"),
+              llvm::cl::desc("Extract binary from drai binary"),
+              llvm::cl::cat(MacroExpandCategory));
+
 static llvm::cl::opt<std::string>
     outputFilename("o", llvm::cl::init("-"), llvm::cl::Prefix,
                    llvm::cl::value_desc("file"),
@@ -46,43 +54,42 @@ CreateArgs(const std::string &filename = inputFilename) {
   tmp.push_back(filename);
   return tmp;
 }
-int main(int argc, char *argv[]) {
-  llvm::cl::ParseCommandLineOptions(argc, argv);
 
-  llvm::IntrusiveRefCntPtr<llvm::vfs::OverlayFileSystem> overlay_filesystem =
-      new llvm::vfs::OverlayFileSystem(llvm::vfs::getRealFileSystem());
-  llvm::IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> upper_filesystem =
-      new llvm::vfs::InMemoryFileSystem();
-  overlay_filesystem->pushOverlay(upper_filesystem);
-
-  std::vector<std::string> base_args = CreateArgs();
-
+std::unique_ptr<clang::CompilerInstance>
+CreateClangInstance(llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem> vfs) {
   std::unique_ptr<clang::CompilerInstance> clang =
       std::make_unique<clang::CompilerInstance>();
 
   clang->createDiagnostics();
-  clang->createFileManager(overlay_filesystem);
+  clang->createFileManager(vfs);
+  return clang;
+}
 
-  std::vector<const char *> pp_args;
-  pp_args.reserve(base_args.size());
-  std::transform(base_args.begin(), base_args.end(),
-                 std::back_inserter(pp_args),
+bool InvokeMacroExpand(llvm::IntrusiveRefCntPtr<LayerFileSystem> vfs,
+                       clang::CompilerInstance *clang,
+                       const std::string &inputFilename,
+                       const std::string &outputFilename) {
+  std::vector<std::string> base_args = CreateArgs(inputFilename);
+  std::vector<const char *> args;
+  args.reserve(base_args.size());
+  std::transform(base_args.begin(), base_args.end(), std::back_inserter(args),
                  [](auto &item) { return item.data(); });
-  clang::CompilerInvocation::CreateFromArgs(clang->getInvocation(), pp_args,
+  clang::CompilerInvocation::CreateFromArgs(clang->getInvocation(), args,
                                             clang->getDiagnostics());
 
-  std::string O;
-  llvm::raw_string_ostream pp_os(O);
-  MacroExpandAction pp_act(pp_os);
-  if (!clang->ExecuteAction(pp_act)) {
+  MacroExpandAction act(vfs, outputFilename);
+  if (!clang->ExecuteAction(act)) {
     llvm::errs() << "Expand macro failed\n";
-    return 1;
+    return false;
   }
+  return true;
+}
 
-  const std::string cppFilename = inputFilename + ".ii";
-  base_args.back() = cppFilename;
-  upper_filesystem->addFile(cppFilename, 0,
-                            llvm::MemoryBuffer::getMemBufferCopy(O));
+bool InvokeDraiExpand(clang::CompilerInstance *clang,
+                      const std::string &inputFilename,
+                      const std::string &elfFilename,
+                      const std::string &outputFilename) {
+  std::vector<std::string> base_args = CreateArgs(inputFilename);
   std::vector<const char *> args;
   args.reserve(base_args.size());
   std::transform(base_args.begin(), base_args.end(), std::back_inserter(args),
@@ -93,12 +100,31 @@ int main(int argc, char *argv[]) {
   std::error_code EC;
   llvm::raw_fd_ostream OS(outputFilename, EC);
   if (EC) {
-    llvm::errs() << EC.message() << '\n';
+    return false;
+  }
+  DraiExpandAction act(elfFilename, OS);
+  if (!clang->ExecuteAction(act)) {
+    return false;
+  }
+  return true;
+}
+
+int main(int argc, char *argv[]) {
+  llvm::cl::ParseCommandLineOptions(argc, argv);
+  const std::string cppFilename = inputFilename + ".ii";
+
+  llvm::IntrusiveRefCntPtr<LayerFileSystem> vfs =
+      new LayerFileSystem(llvm::vfs::getRealFileSystem());
+
+  auto clang = CreateClangInstance(vfs);
+
+  if (!InvokeMacroExpand(vfs, clang.get(), inputFilename, cppFilename)) {
+    llvm::errs() << "Macro expand failed\n";
     return 1;
   }
-  DraiExpandAction act(OS);
-  if (!clang->ExecuteAction(act)) {
-    llvm::errs() << "Expand kernel function failed\n";
+
+  if (!InvokeDraiExpand(clang.get(), cppFilename, elfBinary, outputFilename)) {
+    llvm::errs() << "Drai expand failed\n";
     return 1;
   }
   return 0;

@@ -3,16 +3,23 @@
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendAction.h"
 #include "clang/Frontend/FrontendActions.h"
-#include "llvm/Support/VirtualFileSystem.h"
+
+#include "LayerFilesystem.h"
 
 class MacroExpandAction : public clang::PrintPreprocessedAction {
 private:
-  llvm::raw_ostream &OS;
+  llvm::IntrusiveRefCntPtr<LayerFileSystem> filesystem;
+  std::string outputFilename;
 
 public:
-  MacroExpandAction(llvm::raw_ostream &OS) : OS(OS) {}
+  MacroExpandAction(llvm::IntrusiveRefCntPtr<LayerFileSystem> filesystem,
+                    const std::string &filename)
+      : filesystem(filesystem), outputFilename(filename) {}
+
   void ExecuteAction() override {
     clang::CompilerInstance &CI = getCompilerInstance();
+    std::string buf;
+    llvm::raw_string_ostream OS(buf);
 
     // If we're preprocessing a module map, start by dumping the contents of the
     // module itself before switching to the input buffer.
@@ -29,5 +36,8 @@ public:
 
     DoPrintPreprocessedInput(CI.getPreprocessor(), &OS,
                              CI.getPreprocessorOutputOpts());
+
+    filesystem->addFile(outputFilename,
+                        llvm::MemoryBuffer::getMemBufferCopy(std::move(buf)));
   }
 };
