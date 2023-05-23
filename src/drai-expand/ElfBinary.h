@@ -25,7 +25,7 @@ public:
         obj_file.getBinary());
   }
 
-  std::unique_ptr<llvm::object::ELFSymbolRef>
+  llvm::Optional<llvm::object::ELFSymbolRef>
   findSymbol(const std::string &name, llvm::object::SymbolRef::Type tp) {
     for (auto &&sym : getBinary()->symbols()) {
       llvm::Expected<llvm::StringRef> sym_name = sym.getName();
@@ -42,12 +42,12 @@ public:
       if (*sym_tp != tp) {
         continue;
       }
-      return std::make_unique<llvm::object::ELFSymbolRef>(std::move(sym));
+      return sym;
     }
-    return nullptr;
+    return {};
   }
 
-  std::unique_ptr<llvm::object::ELFSymbolRef>
+  llvm::Optional<llvm::object::ELFSymbolRef>
   findSymbol(const std::string &name) {
     for (auto &&sym : getBinary()->symbols()) {
       llvm::Expected<llvm::StringRef> sym_name = sym.getName();
@@ -55,59 +55,51 @@ public:
         continue;
       }
       if (name == *sym_name) {
-        return std::make_unique<llvm::object::ELFSymbolRef>(std::move(sym));
+        return sym;
       }
     }
-    return nullptr;
+    return {};
   }
 
-  std::unique_ptr<std::string> getSymbolBuffer(const std::string &name) {
-    std::unique_ptr<llvm::object::ELFSymbolRef> sym = findSymbol(name);
+  llvm::Optional<llvm::StringRef> getSymbolBuffer(const std::string &name) {
+    llvm::Optional<llvm::object::ELFSymbolRef> sym = findSymbol(name);
     if (!sym) {
-      return nullptr;
+      return {};
     }
     llvm::Expected<std::uint64_t> addr = sym->getValue();
     llvm::Expected<std::uint64_t> size = sym->getSize();
     llvm::Expected<llvm::object::section_iterator> section_iter =
         sym->getSection();
     if (!addr || !size || !section_iter) {
-      return nullptr;
+      return {};
     }
     llvm::object::ELFSectionRef section = **section_iter;
     std::uint64_t real_addr = *addr + section.getOffset();
     std::uint64_t real_size = *size;
 
-    return std::make_unique<std::string>(
-        getBinary()
-            ->getMemoryBufferRef()
-            .getBuffer()
-            .slice(real_addr, real_addr + real_size)
-            .str());
+    return getBinary()->getMemoryBufferRef().getBuffer().slice(
+        real_addr, real_addr + real_size);
   }
 
-  std::unique_ptr<std::string>
+  llvm::Optional<llvm::StringRef>
   getSymbolBuffer(const std::string &name, llvm::object::SymbolRef::Type tp) {
-    std::unique_ptr<llvm::object::ELFSymbolRef> sym = findSymbol(name, tp);
+    llvm::Optional<llvm::object::ELFSymbolRef> sym = findSymbol(name, tp);
     if (!sym) {
-      return nullptr;
+      return {};
     }
     llvm::Expected<std::uint64_t> addr = sym->getValue();
     llvm::Expected<std::uint64_t> size = sym->getSize();
     llvm::Expected<llvm::object::section_iterator> section_iter =
         sym->getSection();
     if (!addr || !size || !section_iter) {
-      return nullptr;
+      return {};
     }
     llvm::object::ELFSectionRef section = **section_iter;
     std::uint64_t real_addr = *addr + section.getOffset();
     std::uint64_t real_size = *size;
 
-    return std::make_unique<std::string>(
-        getBinary()
-            ->getMemoryBufferRef()
-            .getBuffer()
-            .slice(real_addr, real_addr + real_size)
-            .str());
+    return getBinary()->getMemoryBufferRef().getBuffer().slice(
+        real_addr, real_addr + real_size);
   }
 
   bool good() const { return !has_error; }

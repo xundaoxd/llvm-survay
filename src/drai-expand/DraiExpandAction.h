@@ -157,7 +157,7 @@ public:
       std::string mangle_name;
       llvm::raw_string_ostream OS(mangle_name);
       MC->mangleName(llvm::cast<clang::NamedDecl>(Decl), OS);
-      std::unique_ptr<std::string> buf = elf.getSymbolBuffer(mangle_name);
+      llvm::Optional<llvm::StringRef> buf = elf.getSymbolBuffer(mangle_name);
       if (!buf) {
         llvm::errs() << "Could not find function: " << mangle_name << '\n';
         exit(1);
