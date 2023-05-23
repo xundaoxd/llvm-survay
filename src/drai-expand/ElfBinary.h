@@ -26,71 +26,41 @@ public:
   }
 
   llvm::Optional<llvm::object::ELFSymbolRef>
-  findSymbol(const std::string &name, llvm::object::SymbolRef::Type tp) {
-    for (auto &&sym : getBinary()->symbols()) {
-      llvm::Expected<llvm::StringRef> sym_name = sym.getName();
-      if (!sym_name) {
-        continue;
-      }
-      if (name != *sym_name) {
-        continue;
-      }
-      llvm::Expected<llvm::object::SymbolRef::Type> sym_tp = sym.getType();
-      if (!sym_tp) {
-        continue;
-      }
-      if (*sym_tp != tp) {
-        continue;
-      }
-      return sym;
+  findSymbol(std::function<bool(llvm::object::ELFSymbolRef)> pred) {
+    auto sym_range = getBinary()->symbols();
+    auto iter = std::find_if(sym_range.begin(), sym_range.end(), pred);
+    if (iter == sym_range.end()) {
+      return {};
     }
-    return {};
+    return *iter;
+  }
+
+  llvm::Optional<llvm::object::ELFSymbolRef>
+  findSymbol(const std::string &name, llvm::object::SymbolRef::Type tp) {
+    return findSymbol([&](llvm::object::ELFSymbolRef sym) {
+      llvm::Expected<llvm::StringRef> sym_name = sym.getName();
+      llvm::Expected<llvm::object::SymbolRef::Type> sym_tp = sym.getType();
+      if (!sym_name || !sym_tp) {
+        return false;
+      }
+      return name == *sym_name && tp == *sym_tp;
+    });
   }
 
   llvm::Optional<llvm::object::ELFSymbolRef>
   findSymbol(const std::string &name) {
-    for (auto &&sym : getBinary()->symbols()) {
+    return findSymbol([&](llvm::object::ELFSymbolRef sym) {
       llvm::Expected<llvm::StringRef> sym_name = sym.getName();
-      if (!sym_name) {
-        continue;
-      }
-      if (name == *sym_name) {
-        return sym;
-      }
-    }
-    return {};
-  }
-
-  llvm::Optional<llvm::StringRef> getSymbolBuffer(const std::string &name) {
-    llvm::Optional<llvm::object::ELFSymbolRef> sym = findSymbol(name);
-    if (!sym) {
-      return {};
-    }
-    llvm::Expected<std::uint64_t> addr = sym->getValue();
-    llvm::Expected<std::uint64_t> size = sym->getSize();
-    llvm::Expected<llvm::object::section_iterator> section_iter =
-        sym->getSection();
-    if (!addr || !size || !section_iter) {
-      return {};
-    }
-    llvm::object::ELFSectionRef section = **section_iter;
-    std::uint64_t real_addr = *addr + section.getOffset();
-    std::uint64_t real_size = *size;
-
-    return getBinary()->getMemoryBufferRef().getBuffer().slice(
-        real_addr, real_addr + real_size);
+      return !sym_name && *sym_name == name;
+    });
   }
 
   llvm::Optional<llvm::StringRef>
-  getSymbolBuffer(const std::string &name, llvm::object::SymbolRef::Type tp) {
-    llvm::Optional<llvm::object::ELFSymbolRef> sym = findSymbol(name, tp);
-    if (!sym) {
-      return {};
-    }
-    llvm::Expected<std::uint64_t> addr = sym->getValue();
-    llvm::Expected<std::uint64_t> size = sym->getSize();
+  getSymbolBuffer(llvm::object::ELFSymbolRef sym) {
+    llvm::Expected<std::uint64_t> addr = sym.getValue();
+    llvm::Expected<std::uint64_t> size = sym.getSize();
     llvm::Expected<llvm::object::section_iterator> section_iter =
-        sym->getSection();
+        sym.getSection();
     if (!addr || !size || !section_iter) {
       return {};
     }

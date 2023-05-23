@@ -157,7 +157,13 @@ public:
       std::string mangle_name;
       llvm::raw_string_ostream OS(mangle_name);
       MC->mangleName(llvm::cast<clang::NamedDecl>(Decl), OS);
-      llvm::Optional<llvm::StringRef> buf = elf.getSymbolBuffer(mangle_name);
+      llvm::Optional<llvm::object::ELFSymbolRef> sym =
+          elf.findSymbol(mangle_name);
+      if (!sym) {
+        llvm::errs() << "Could not find symbol: " << mangle_name << '\n';
+        exit(1);
+      }
+      llvm::Optional<llvm::StringRef> buf = elf.getSymbolBuffer(*sym);
       if (!buf) {
         llvm::errs() << "Could not find function: " << mangle_name << '\n';
         exit(1);
