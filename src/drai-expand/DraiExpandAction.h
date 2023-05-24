@@ -21,7 +21,7 @@ char header_template[] = R"^(
 
 char function_template[] = R"^(
 void $func_name($func_args) {
-  static char binary[] = {$binary_data};
+  static unsigned char binary[] = {$binary_data};
 
   static std::once_flag flag;
   std::call_once(flag, [&]() {
@@ -31,7 +31,7 @@ void $func_name($func_args) {
   auto&& args = ::drai::PopLaunchConfig();
   assert(args.size() >= 1);
   drai::graph::DraiGraph* graph = (drai::graph::DraiGraph*)args[0];
-  auto op = graph->NewKernel("$func_name" $arg_vars);
+  auto op = graph->NewKernel((void(*)($func_args))&$func_name $arg_vars);
   if (args.size() >= 2) {
     op.CoreCount(args[1]);
   }
@@ -171,6 +171,15 @@ public:
       tmp =
           std::regex_replace(tmp, std::regex("\\$binary_data"),
                              fmt::format("0x{:02x}", fmt::join(*buf, ", 0x")));
+    }
+
+    {
+      // for $arg_vars
+      std::stringstream ss;
+      for (auto &&param : Decl->parameters()) {
+        ss << ", " << param->getName().str();
+      }
+      tmp = std::regex_replace(tmp, std::regex("\\$arg_vars"), ss.str());
     }
 
     return tmp;

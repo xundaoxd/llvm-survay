@@ -51,7 +51,7 @@ public:
   findSymbol(const std::string &name) {
     return findSymbol([&](llvm::object::ELFSymbolRef sym) {
       llvm::Expected<llvm::StringRef> sym_name = sym.getName();
-      return !sym_name && *sym_name == name;
+      return sym_name && *sym_name == name;
     });
   }
 
